@@ -41,12 +41,73 @@
       font-weight: bold;
       box-shadow: 0 0 8px rgba(0, 230, 118, 0.2);
     }
+    .divider {
+      border: none;
+      border-top: 1px solid #333;
+      margin: 10px 0;
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 2px;
+    }
+    .toggle-label {
+      font-size: 13px;
+      color: #e3e3e3;
+    }
+    .toggle {
+      position: relative;
+      width: 36px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+    .toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .slider {
+      position: absolute;
+      inset: 0;
+      background-color: #444746;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+    }
+    .slider::before {
+      content: '';
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      left: 3px;
+      top: 3px;
+      background-color: #e3e3e3;
+      border-radius: 50%;
+      transition: transform 0.2s ease;
+    }
+    .toggle input:checked + .slider {
+      background-color: #00e676;
+      box-shadow: 0 0 8px rgba(0, 230, 118, 0.3);
+    }
+    .toggle input:checked + .slider::before {
+      transform: translateX(16px);
+    }
   </style>
 </head>
 <body>
   <div class="header">Quiz Mode</div>
   <button id="off" class="active">Off</button>
   <button id="highlight">Highlight</button>
+  <button disabled="true" id="stealth">Stealth (not working)</button>
+  <hr class="divider">
+  <div class="toggle-row">
+    <span class="toggle-label">Fast Complete (not working)</span>
+    <label class="toggle">
+      <input type="checkbox" disabled="true "id="fastComplete">
+      <span class="slider"></span>
+    </label>
+  </div>
   <script src="popup.js"></script>
 </body>
 </html>
