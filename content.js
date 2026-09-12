@@ -3,14 +3,11 @@
   let fastComplete = window.localStorage.getItem('fast_complete') === 'true';
   let lastQuestionContent = "";
 
-  console.log("[Quiz Helper] Script loaded. Current mode:", currentMode);
-
   window.addEventListener("message", (event) => {
     if (event.data && event.data.type === "FROM_EXTENSION") {
       if (event.data.mode !== undefined) {
         currentMode = event.data.mode;
         window.localStorage.setItem('quiz_helper_mode', currentMode);
-        console.log("[Quiz Helper] Mode updated to:", currentMode);
         if (currentMode === "off") {
           clearHighlights();
         } else {
@@ -41,6 +38,7 @@
     const textInput = document.querySelector('input[type="text"], input:not([type="checkbox"]):not([type="radio"]), textarea');
     if (textInput) textInput.placeholder = "";
   }
+
   function extractStrings(obj) {
     let strings = [];
     if (!obj) return strings;
@@ -60,7 +58,7 @@
     const btn = answerEl.closest('button');
     if (!btn) return null;
 
-    const key = Object.keys(btn).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactProps$'));
+    const key = Object.keys(btn).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
     if (!key) return null;
 
     let fiber = btn[key];
@@ -134,6 +132,7 @@
       }
     }
   }
+
   function initWatcher() {
     setInterval(() => {
       if (currentMode !== "highlight") return;
@@ -152,126 +151,221 @@
     }, 50);
   }
 
-  function initVideoHook() {
-    setInterval(() => {
-      document.querySelectorAll('i.fa:not([data-hooked])').forEach(icon => {
-        const text = icon.parentElement?.textContent || '';
-        if (text.includes('Titta på film') || text.includes('Video')) {
-          icon.setAttribute('data-hooked', 'true');
-          icon.addEventListener('click', () => {
-            if (!fastComplete) return;
+  // --- AUTOMATION ENGINE ---
 
-            icon.removeAttribute('ng-class');
-            icon.classList.remove('fa-square-o');
-            icon.classList.add('fa-check-square-o');
+  function getAuthToken() {
+    const cookieMatch = document.cookie.match(/(?:eu-central-1__[a-f0-9]+)/i);
+    if (cookieMatch) return cookieMatch[0];
 
-            const container = icon.closest('.to-do');
-            if (container) {
-              container.removeAttribute('ng-class');
-              container.classList.add('completed');
-            }
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      const val = localStorage.getItem(key);
+      if (typeof val === 'string' && val.includes('eu-central-1__')) {
+        const match = val.match(/eu-central-1__[a-f0-9]+/i);
+        if (match) return match[0];
+      }
+    }
 
-            const root = document.querySelector('[ng-app]') || document.body;
-            if (!window.angular) return;
-            const injector = window.angular.element(root).injector();
-            if (!injector) return;
-
-            const headers = injector.get('$http').defaults.headers;
-            const token = headers.post?.Authorization || headers.post?.authorization || headers.common?.Authorization || headers.Authorization;
-
-            const ctrl = Array.from(document.querySelectorAll('*'))
-              .map(element => window.angular.element(element).controller())
-              .find(instance => instance?.playerContentFactory);
-
-            if (!ctrl || !token) return;
-
-            const lessonId = ctrl.playerContentFactory.lesson.id;
-            const subjectId = ctrl.playerContentFactory.lesson.default_subject_id;
-
-            fetch("https://api.binogi.se/lessons/videoReport", {
-              method: "POST",
-              headers: {
-                "Authorization": token,
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify({
-                lesson_id: lessonId,
-                watched_seconds: 5,
-                subject_id: subjectId
-              })
-            });
-          }, { once: true });
-        }
-      });
-    }, 1000);
+    return localStorage.getItem('token') || 
+           localStorage.getItem('auth_token') || 
+           sessionStorage.getItem('token');
   }
 
-  function initQuizHook() {
+  function getReactFiber(element) {
+    if (!element) return null;
+    const key = Object.keys(element).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+    return key ? element[key] : null;
+  }
+
+  function extractTaskAndAssignment(element) {
+    let fiber = getReactFiber(element);
+    let taskId = null;
+    let assignmentId = null;
+    let subjectId = 423;
+    let gradeId = 177;
+
+    while (fiber) {
+      const props = fiber.memoizedProps;
+      if (props) {
+        if (!taskId) {
+          const taskObj = props.task || props.lesson || props.item;
+          if (taskObj) {
+            taskId = taskObj.task_id || taskObj.id;
+            if (taskObj.subject_id) subjectId = taskObj.subject_id;
+            if (taskObj.grade_id) gradeId = taskObj.grade_id;
+          }
+        }
+        if (!assignmentId) {
+          const assignObj = props.assignment || props.assignmentId;
+          if (assignObj) {
+            assignmentId = typeof assignObj === 'object' ? assignObj.id : assignObj;
+          }
+        }
+      }
+      fiber = fiber.return;
+    }
+
+    return {
+      taskId: taskId ? parseInt(taskId, 10) : null,
+      assignmentId: assignmentId ? parseInt(assignmentId, 10) : null,
+      subjectId: parseInt(subjectId, 10) || 423,
+      gradeId: parseInt(gradeId, 10) || 177
+    };
+  }
+
+  async function fetchQuizQuestions(lessonCode, token) {
+    try {
+      const res = await fetch(`https://content.binogi.net/api/legacy/lessons/${lessonCode}`, {
+        headers: {
+          "accept": "application/json, text/plain, */*",
+          "authorization": token,
+          "Referer": "https://binogi.com/"
+        }
+      });
+      if (!res.ok) return {};
+
+      const data = await res.json();
+      const questions = data?.quiz?.questions || [];
+      const levelsData = { 1: [], 2: [], 3: [] };
+
+      questions.forEach((q) => {
+        const lvl = q.level;
+        const qid = q.qid;
+        if (!levelsData[lvl] || !qid) return;
+
+        const options = q.options || [];
+        let correctOpt = options.find(opt => opt.isCorrect) || options[0];
+        const oid = correctOpt ? correctOpt.oid : null;
+
+        if (oid) {
+          levelsData[lvl].push({
+            question_uuid: qid,
+            selected_answer_uuid: oid
+          });
+        }
+      });
+
+      return levelsData;
+    } catch {
+      return {};
+    }
+  }
+
+  function initAutoCompleter() {
     setInterval(() => {
-      document.querySelectorAll('i.fa:not([data-quiz-hooked])').forEach(icon => {
-        const text = icon.parentElement?.textContent || '';
-        if (text.includes('Gör quiz') || text.includes('Quiz')) {
-          icon.setAttribute('data-quiz-hooked', 'true');
-          icon.addEventListener('click', () => {
-            if (!fastComplete) return;
+      if (!fastComplete) {
+        document.querySelectorAll('[data-auto-hooked]').forEach(el => {
+          el.removeAttribute('data-auto-hooked');
+        });
+        return;
+      }
 
-            icon.removeAttribute('ng-class');
-            icon.classList.remove('fa-square-o');
-            icon.classList.add('fa-check-square-o');
+      const thumbnails = document.querySelectorAll('div.css-ktqdlo:not([data-auto-hooked]), div.css-1dsy9jz:not([data-auto-hooked])');
 
-            const container = icon.closest('.to-do');
-            if (container) {
-              container.removeAttribute('ng-class');
-              container.classList.add('completed');
+      thumbnails.forEach((thumb) => {
+        const row = thumb.closest('div.css-z6h8lq, div.css-17ikkdj');
+        if (!row) return;
+
+        const hasCheckmark = !!row.querySelector('img[alt="Bock-ikon"]');
+        if (hasCheckmark) return;
+
+        const isVideo = !!row.querySelector('img[alt="Videoikon"]') || row.textContent.includes('Video');
+        const isQuiz = !!row.querySelector('img[alt="Quiz-ikon"]') || row.textContent.includes('Quiz');
+
+        if (!isVideo && !isQuiz) return;
+
+        thumb.setAttribute('data-auto-hooked', 'true');
+
+        thumb.addEventListener('click', async (e) => {
+          if (!fastComplete) return;
+
+          e.stopPropagation();
+
+          const imgEl = thumb.querySelector('img[src*="thumbs_small/"]');
+          let lessonCode = "";
+          if (imgEl) {
+            const match = imgEl.src.match(/thumbs_small\/([A-Za-z0-9]+)\.png/);
+            if (match && match[1]) {
+              lessonCode = match[1];
             }
+          }
 
-            const root = document.querySelector('[ng-app]') || document.body;
-            if (!window.angular) return;
-            const injector = window.angular.element(root).injector();
-            if (!injector) return;
+          const { taskId, assignmentId, subjectId, gradeId } = extractTaskAndAssignment(row);
+          const token = getAuthToken();
 
-            const headers = injector.get('$http').defaults.headers;
-            const token = headers.post?.Authorization || headers.post?.authorization || headers.common?.Authorization || headers.Authorization;
+          if (!token) return;
 
-            const ctrl = Array.from(document.querySelectorAll('*'))
-              .map(element => window.angular.element(element).controller())
-              .find(instance => instance?.playerContentFactory);
+          if (isVideo) {
+            const payload = {
+              activity_type_id: 1,
+              lesson_code: lessonCode,
+              activity_data: {
+                subtitle_language: "",
+                audio_language: "sv",
+                assignment_id: assignmentId,
+                task_id: taskId,
+                localization: "SE_sv",
+                subject_id: subjectId
+              }
+            };
 
-            if (!ctrl || !token) return;
-
-            const lessonCode = ctrl.conceptsFactory?.id || ctrl.playerContentFactory?.lesson?.code;
-            const subjectId = ctrl.playerContentFactory.lesson.default_subject_id;
-
-            for (let level = 1; level <= 3; level++) {
-              fetch("https://api.binogi.se/lessons/quizReport", {
+            try {
+              await fetch("https://useractivity.binogi.net/api/activity", {
                 method: "POST",
                 headers: {
-                  "Authorization": token,
-                  "Content-Type": "application/json"
+                  "accept": "application/json",
+                  "authorization": token,
+                  "content-type": "application/json",
+                  "Referer": "https://binogi.com/"
                 },
-                body: JSON.stringify({
-                  level: level,
-                  lesson_code: lessonCode,
-                  result: [
-                    {
-                      question_uuid: "00000000-0000-4000-8000-000000000000",
-                      result: true,
-                      language_code: "sv",
-                      answer_timestamp: Math.floor(Date.now() / 1000)
-                    }
-                  ],
-                  subject_id: subjectId,
-                  passed: true
-                })
+                body: JSON.stringify(payload)
               });
+            } catch {}
+
+          } else if (isQuiz) {
+            const levelsData = await fetchQuizQuestions(lessonCode, token);
+
+            for (let level = 1; level <= 3; level++) {
+              const qas = levelsData[level] || [];
+              const questionsCorrect = qas.map(qa => qa.question_uuid);
+
+              if (questionsCorrect.length === 0) continue;
+
+              const payload = {
+                activity_type_id: 2,
+                lesson_code: lessonCode,
+                activity_data: {
+                  quiz_level: level,
+                  questions_correct: questionsCorrect,
+                  questions_incorrect: [],
+                  question_answers: qas,
+                  grade_id: gradeId,
+                  subject_id: subjectId,
+                  text_language: "sv",
+                  assignment_id: assignmentId,
+                  task_id: taskId
+                }
+              };
+
+              try {
+                await fetch("https://useractivity.binogi.net/api/activity", {
+                  method: "POST",
+                  headers: {
+                    "accept": "application/json",
+                    "authorization": token,
+                    "content-type": "application/json",
+                    "Referer": "https://binogi.com/"
+                  },
+                  body: JSON.stringify(payload)
+                });
+              } catch {}
             }
-          }, { once: true });
-        }
+          }
+        });
       });
     }, 1000);
   }
 
   initWatcher();
-  initVideoHook();
-  initQuizHook();
+  initAutoCompleter();
 })();
